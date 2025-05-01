@@ -101,6 +101,7 @@ obj-y			+= kernel/
 obj-y			+= certs/
 obj-y			+= mm/
 obj-y			+= fs/
+obj-y			+= mydebug/
 obj-y			+= ipc/
 obj-y			+= security/
 obj-y			+= crypto/
