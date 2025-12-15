@@ -8,6 +8,8 @@
 #ifndef _H_CIFS_DEBUG
 #define _H_CIFS_DEBUG
 
+#include <mydebug.h>
+
 #ifdef pr_fmt
 #undef pr_fmt
 #endif
