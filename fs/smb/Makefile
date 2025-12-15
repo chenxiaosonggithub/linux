@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0
 
+subdir-ccflags-y += -include $(srctree)/include/mydebug.h
+
 obj-$(CONFIG_SMBFS)		+= common/
 obj-$(CONFIG_SMBDIRECT)		+= smbdirect/
 obj-$(CONFIG_CIFS)		+= client/
