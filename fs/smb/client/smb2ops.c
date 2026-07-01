@@ -5765,6 +5765,7 @@ static int smb2_make_node(unsigned int xid, struct inode *inode,
 
 #ifdef CONFIG_CIFS_ALLOW_INSECURE_LEGACY
 struct smb_version_operations smb20_operations = {
+	.send_cancel = smb2_send_cancel,
 	.compare_fids = smb2_compare_fids,
 	.setup_request = smb2_setup_request,
 	.setup_async_request = smb2_setup_async_request,
@@ -5867,6 +5868,7 @@ struct smb_version_operations smb20_operations = {
 #endif /* CIFS_ALLOW_INSECURE_LEGACY */
 
 struct smb_version_operations smb21_operations = {
+	.send_cancel = smb2_send_cancel,
 	.compare_fids = smb2_compare_fids,
 	.setup_request = smb2_setup_request,
 	.setup_async_request = smb2_setup_async_request,
@@ -5971,6 +5973,7 @@ struct smb_version_operations smb21_operations = {
 };
 
 struct smb_version_operations smb30_operations = {
+	.send_cancel = smb2_send_cancel,
 	.compare_fids = smb2_compare_fids,
 	.setup_request = smb2_setup_request,
 	.setup_async_request = smb2_setup_async_request,
@@ -6087,6 +6090,7 @@ struct smb_version_operations smb30_operations = {
 };
 
 struct smb_version_operations smb311_operations = {
+	.send_cancel = smb2_send_cancel,
 	.compare_fids = smb2_compare_fids,
 	.setup_request = smb2_setup_request,
 	.setup_async_request = smb2_setup_async_request,
