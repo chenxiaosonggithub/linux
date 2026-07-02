@@ -38,6 +38,7 @@ static void smb2_notify_cancel(void **argv)
 {
 	struct ksmbd_notify_req *notify_req = argv[0];
 
+	ksmbd_debug(NOTIFY, "Wake pending notify request\n");
 	wake_up(&notify_req->wait);
 }
 
@@ -64,6 +65,11 @@ ksmbd_notify_validate_req(struct ksmbd_work *work,
 		return ERR_PTR(-ENOENT);
 	}
 
+	ksmbd_debug(NOTIFY,
+		    "fid %llu:%llu, handle notify request, filter 0x%x, flags 0x%x\n",
+		    fp->persistent_id, fp->volatile_id,
+		    le32_to_cpu(req->CompletionFilter), le16_to_cpu(req->Flags));
+
 	return fp;
 }
 
@@ -77,6 +83,8 @@ static int ksmbd_notify_wait(struct ksmbd_work *work,
 	list_add_tail(&work->fp_entry, &fp->blocked_works);
 	spin_unlock(&fp->f_lock);
 
+	ksmbd_debug(NOTIFY, "Notify request pending, async id %d\n",
+		    work->async_id);
 	smb2_send_interim_resp(work, STATUS_PENDING);
 
 	err = wait_event_interruptible(notify_req->wait,
@@ -147,8 +155,12 @@ int ksmbd_handle_notify(struct ksmbd_work *work,
 
 	if (work->state == KSMBD_WORK_CLOSED) {
 		rsp->hdr.Status = STATUS_NOTIFY_CLEANUP;
+		ksmbd_debug(NOTIFY, "Notify handle closed, async id %d\n",
+			    work->async_id);
 	} else {
 		rsp->hdr.Status = STATUS_CANCELLED;
+		ksmbd_debug(NOTIFY, "Notify request cancelled, async id %d\n",
+			    work->async_id);
 	}
 	smb2_send_interim_resp(work, rsp->hdr.Status);
 	work->send_no_response = 1;
