@@ -1001,21 +1001,27 @@ int setup_async_work(struct ksmbd_work *work, void (*fn)(void **), void **arg)
 		pr_err("Failed to alloc async message id\n");
 		return id;
 	}
+
+	spin_lock(&conn->request_lock);
+	if (ksmbd_conn_exiting(conn) || ksmbd_conn_releasing(conn)) {
+		spin_unlock(&conn->request_lock);
+		pr_err_ratelimited("Failed to setup async work: connection is exiting\n");
+		ksmbd_release_id(&conn->async_ida, id);
+		return -ESHUTDOWN;
+	}
+
 	work->asynchronous = true;
 	work->async_id = id;
+	work->cancel_fn = fn;
+	work->cancel_argv = arg;
+
+	if (list_empty(&work->async_request_entry))
+		list_add_tail(&work->async_request_entry, &conn->async_requests);
+	spin_unlock(&conn->request_lock);
 
 	ksmbd_debug(SMB,
 		    "Send interim Response to inform async request id : %d\n",
 		    work->async_id);
-
-	work->cancel_fn = fn;
-	work->cancel_argv = arg;
-
-	if (list_empty(&work->async_request_entry)) {
-		spin_lock(&conn->request_lock);
-		list_add_tail(&work->async_request_entry, &conn->async_requests);
-		spin_unlock(&conn->request_lock);
-	}
 
 	return 0;
 }
