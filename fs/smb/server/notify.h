@@ -16,6 +16,7 @@
 #include <linux/fsnotify_backend.h>
 
 struct ksmbd_work;
+struct ksmbd_file;
 struct smb2_change_notify_req;
 struct smb2_change_notify_rsp;
 
@@ -41,6 +42,7 @@ struct ksmbd_notify_req {
 int ksmbd_handle_notify(struct ksmbd_work *work,
 			struct smb2_change_notify_req *req,
 			struct smb2_change_notify_rsp *rsp);
+void ksmbd_notify_remove(struct ksmbd_file *fp);
 
 #if IS_ENABLED(CONFIG_SMB_SERVER_KUNIT_TESTS)
 char *ksmbd_notify_tree_name_test(struct ksmbd_notify *notify,
