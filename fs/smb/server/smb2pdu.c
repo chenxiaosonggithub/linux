@@ -11213,18 +11213,9 @@ int smb2_notify(struct ksmbd_work *work)
 		in_work->cancel_argv[1] = fp;
 		in_work->cancel_fn = smb2_notify_cancel_fn;
 	}
-
-	if (!ksmbd_conn_link_async_request(work->conn, in_work)) {
-		kfree(in_work->cancel_argv);
-		in_work->cancel_argv = NULL;
-		in_work->cancel_fn = NULL;
-		in_work->asynchronous = false;
-		ksmbd_fd_put(work, fp);
-		ksmbd_conn_write(in_work);
-		ksmbd_free_work_struct(in_work);
-		work->send_no_response = 1;
-		return 0;
-	}
+	spin_lock(&work->conn->request_lock);
+	list_add_tail(&in_work->async_request_entry, &work->conn->async_requests);
+	spin_unlock(&work->conn->request_lock);
 
 	spin_lock(&fp->f_lock);
 	list_add_tail(&in_work->notify_entry, &fp->notify_pendings);
