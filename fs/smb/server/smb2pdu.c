@@ -56,10 +56,6 @@ static void __wbuf(struct ksmbd_work *work, void **req, void **rsp)
 	}
 }
 
-static struct ksmbd_work *smb2_notify_cancel_claim(void **argv);
-static void smb2_notify_cancel_fn(void **argv);
-static void smb2_complete_notify_cancel(struct ksmbd_work *in_work);
-
 #define WORK_BUFFERS(w, rq, rs)	__wbuf((w), (void **)&(rq), (void **)&(rs))
 
 #define SMB2_CREATE_FILE_ATTRIBUTE_MASK \
@@ -8995,7 +8991,6 @@ int smb2_cancel(struct ksmbd_work *work)
 	struct smb2_hdr *hdr = smb_get_msg(work->request_buf);
 	struct smb2_hdr *chdr;
 	struct ksmbd_work *iter;
-	struct ksmbd_work *cancelled_notify = NULL;
 	struct list_head *command_list;
 
 	if (work->next_smb2_rcv_hdr_off)
@@ -9033,23 +9028,11 @@ int smb2_cancel(struct ksmbd_work *work)
 				    le64_to_cpu(hdr->Id.AsyncId),
 				    le16_to_cpu(chdr->Command));
 			iter->state = KSMBD_WORK_CANCELLED;
-			if (iter->cancel_fn == smb2_notify_cancel_fn)
-				cancelled_notify =
-					smb2_notify_cancel_claim(iter->cancel_argv);
-			else if (iter->cancel_fn)
+			if (iter->cancel_fn)
 				iter->cancel_fn(iter->cancel_argv);
 			break;
 		}
 		spin_unlock(&conn->request_lock);
-
-		/*
-		 * Complete a cancelled notify before this CANCEL handler returns.
-		 * Deferring it to the system workqueue lets a following request and
-		 * its response overtake STATUS_CANCELLED, leaving clients waiting
-		 * for the original notify even though the cancellation was accepted.
-		 */
-		if (cancelled_notify)
-			smb2_complete_notify_cancel(cancelled_notify);
 	} else {
 		command_list = &conn->requests;
 
@@ -11012,54 +10995,37 @@ int smb2_oplock_break(struct ksmbd_work *work)
  * it from here would self-deadlock the very thread processing the
  * client's CANCEL command. ksmbd_conn_write() can also sleep (it takes
  * conn's write mutex). So: do only the non-sleeping, no-relock cleanup
- * inline here. smb2_cancel() sends and frees the claimed notify after it
- * drops request_lock, preserving response order for a client CANCEL. The
- * connection teardown caller has no such post-unlock path, so its wrapper
- * defers the send and free to a workqueue.
+ * inline here (the async_requests removal itself is safe without
+ * re-locking, since the caller already holds that lock), and defer the
+ * actual response send + work-struct free to a workqueue, matching the
+ * minimal, non-blocking style of the existing smb2_remove_blocked_lock()
+ * cancel_fn (which only wakes a waiter, never sends network data itself).
  */
 struct notify_cancel_ctx {
 	struct work_struct	work;
 	struct ksmbd_work	*in_work;
 };
 
-static void smb2_send_notify_cancelled(struct ksmbd_work *work)
-{
-	struct smb2_hdr *hdr = smb_get_msg(work->response_buf);
-	struct ksmbd_conn *conn = work->conn;
-	struct ksmbd_session *sess;
-
-	sess = ksmbd_session_lookup(conn, le64_to_cpu(hdr->SessionId));
-	if (sess) {
-		work->sess = sess;
-		if (work->encrypted && sess->enc && conn->ops->encrypt_resp) {
-			conn->ops->encrypt_resp(work);
-		} else if (conn->ops->is_sign_req && conn->ops->set_sign_rsp &&
-			   conn->ops->is_sign_req(work,
-						 conn->ops->get_cmd_val(work))) {
-			conn->ops->set_sign_rsp(work);
-		}
-	}
-
-	ksmbd_conn_write(work);
-	if (sess) {
-		ksmbd_user_session_put(sess);
-		work->sess = NULL;
-	}
-}
-
 static void smb2_notify_cancel_deferred(struct work_struct *w)
 {
 	struct notify_cancel_ctx *ctx =
 		container_of(w, struct notify_cancel_ctx, work);
+	struct ksmbd_work *in_work = ctx->in_work;
+	struct smb2_hdr *in_hdr;
 
-	smb2_complete_notify_cancel(ctx->in_work);
+	in_hdr = smb_get_msg(in_work->response_buf);
+	in_hdr->Status = STATUS_CANCELLED;
+	ksmbd_conn_write(in_work);
+	ksmbd_free_work_struct(in_work);
 	kfree(ctx);
 }
 
-static struct ksmbd_work *smb2_notify_cancel_claim(void **argv)
+static void smb2_notify_cancel_fn(void **argv)
 {
 	struct ksmbd_work *in_work = (struct ksmbd_work *)argv[0];
 	struct ksmbd_file *fp = (struct ksmbd_file *)argv[1];
+	struct ksmbd_conn *conn = in_work->conn;
+	struct notify_cancel_ctx *ctx;
 	bool claimed;
 
 	spin_lock(&fp->f_lock);
@@ -11069,44 +11035,22 @@ static struct ksmbd_work *smb2_notify_cancel_claim(void **argv)
 	spin_unlock(&fp->f_lock);
 
 	if (!claimed)
-		return NULL;
+		return;
 
-	/* conn->request_lock is held by smb2_cancel() or connection teardown. */
+	/* conn->request_lock is already held by the caller (smb2_cancel()). */
+	list_del_init(&in_work->async_request_entry);
+	in_work->asynchronous = false;
 	in_work->cancel_fn = NULL;
 	kfree(in_work->cancel_argv);
 	in_work->cancel_argv = NULL;
-	return in_work;
-}
-
-static void smb2_complete_notify_cancel(struct ksmbd_work *in_work)
-{
-	struct smb2_hdr *in_hdr = smb_get_msg(in_work->response_buf);
-
-	in_hdr->Status = STATUS_CANCELLED;
-	smb2_send_notify_cancelled(in_work);
-	release_async_work(in_work);
-	ksmbd_free_work_struct(in_work);
-}
-
-static void smb2_notify_cancel_fn(void **argv)
-{
-	struct ksmbd_work *in_work = smb2_notify_cancel_claim(argv);
-	struct ksmbd_conn *conn;
-	struct notify_cancel_ctx *ctx;
-
-	if (!in_work)
-		return;
-	conn = in_work->conn;
+	if (in_work->async_id) {
+		ksmbd_release_id(&conn->async_ida, in_work->async_id);
+		in_work->async_id = 0;
+	}
 
 	ctx = kmalloc(sizeof(*ctx), GFP_ATOMIC);
 	if (!ctx) {
 		/* Can't defer the response -- free without sending one. */
-		list_del_init(&in_work->async_request_entry);
-		in_work->asynchronous = false;
-		if (in_work->async_id) {
-			ksmbd_release_id(&conn->async_ida, in_work->async_id);
-			in_work->async_id = 0;
-		}
 		ksmbd_free_work_struct(in_work);
 		return;
 	}
@@ -11227,8 +11171,6 @@ int smb2_notify(struct ksmbd_work *work)
 		smb2_set_err_rsp(work);
 		return 0;
 	}
-	memcpy(smb_get_msg(in_work->request_buf), req,
-	       __SMB2_HEADER_STRUCTURE_SIZE);
 
 	if (setup_async_work(work, NULL, NULL)) {
 		ksmbd_free_work_struct(in_work);
@@ -11243,7 +11185,6 @@ int smb2_notify(struct ksmbd_work *work)
 	/* Keep the async IDA alive until the deferred work is released. */
 	in_work->conn = ksmbd_conn_get(work->conn);
 	in_work->owns_conn_ref = true;
-	in_work->encrypted = work->encrypted;
 	in_hdr = smb_get_msg(in_work->response_buf);
 	memcpy(in_hdr, ksmbd_resp_buf_next(work), __SMB2_HEADER_STRUCTURE_SIZE);
 	in_hdr->Flags |= SMB2_FLAGS_ASYNC_COMMAND;
