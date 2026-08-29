@@ -73,9 +73,21 @@ static int ksmbd_notify_wait(struct ksmbd_work *work,
 {
 	int err;
 
+	/*
+	 * Handle close holds the file-table write lock while it marks the
+	 * handle closed and walks blocked_works.  Hold the matching read lock
+	 * across the state check and registration so close cannot finish its
+	 * walk between the lookup above and this list insertion.
+	 */
+	read_lock(&work->sess->file_table.lock);
+	if (fp->f_state != FP_INITED) {
+		read_unlock(&work->sess->file_table.lock);
+		return -ENOENT;
+	}
 	spin_lock(&fp->f_lock);
 	list_add_tail(&work->fp_entry, &fp->blocked_works);
 	spin_unlock(&fp->f_lock);
+	read_unlock(&work->sess->file_table.lock);
 
 	smb2_send_interim_resp(work, STATUS_PENDING);
 
@@ -144,6 +156,10 @@ int ksmbd_handle_notify(struct ksmbd_work *work,
 	async_work = true;
 
 	err = ksmbd_notify_wait(work, fp, &notify_req);
+	if (err == -ENOENT) {
+		rsp->hdr.Status = STATUS_NOTIFY_CLEANUP;
+		goto out;
+	}
 
 	if (work->state == KSMBD_WORK_CLOSED) {
 		rsp->hdr.Status = STATUS_NOTIFY_CLEANUP;
