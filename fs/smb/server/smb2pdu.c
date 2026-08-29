@@ -1240,6 +1240,7 @@ void smb2_send_interim_resp(struct ksmbd_work *work, __le32 status)
 {
 	struct smb2_hdr *rsp_hdr;
 	struct ksmbd_work *in_work = ksmbd_alloc_work_struct();
+	u16 command;
 
 	if (!in_work)
 		return;
@@ -1262,6 +1263,23 @@ void smb2_send_interim_resp(struct ksmbd_work *work, __le32 status)
 	rsp_hdr->Id.AsyncId = cpu_to_le64(work->async_id);
 	smb2_set_err_rsp(in_work);
 	rsp_hdr->Status = status;
+
+	/*
+	 * Async interim responses are unsigned, but final responses must
+	 * follow the normal signing rules. The synthetic work has no
+	 * request buffer, so use the original work for request signing
+	 * checks and the response header for SMB3 command selection.
+	 */
+	command = work->conn->ops->get_cmd_val(work);
+	if (status != STATUS_PENDING && !work->encrypted && work->sess &&
+	    work->conn->ops->set_sign_rsp &&
+	    (work->sess->sign ||
+	     (work->conn->ops->is_sign_req &&
+	      work->conn->ops->is_sign_req(work, command)))) {
+		in_work->sess = work->sess;
+		work->conn->ops->set_sign_rsp(in_work);
+		in_work->sess = NULL;
+	}
 
 	if (smb2_send_interim_work(in_work, work, true))
 		ksmbd_debug(SMB, "failed to send interim response\n");
@@ -11760,9 +11778,23 @@ int smb2_notify(struct ksmbd_work *work)
 	}
 	async_work = true;
 
+	/*
+	 * Handle close holds the file-table write lock while it marks the
+	 * handle closed and walks blocked_works.  Hold the matching read lock
+	 * across the state check and registration so close cannot finish its
+	 * walk between the lookup above and this list insertion.
+	 */
+	read_lock(&work->sess->file_table.lock);
+	if (fp->f_state != FP_INITED) {
+		read_unlock(&work->sess->file_table.lock);
+		rsp->hdr.Status = STATUS_NOTIFY_CLEANUP;
+		err = -ENOENT;
+		goto out;
+	}
 	spin_lock(&fp->f_lock);
 	list_add_tail(&work->fp_entry, &fp->blocked_works);
 	spin_unlock(&fp->f_lock);
+	read_unlock(&work->sess->file_table.lock);
 
 	smb2_send_interim_resp(work, STATUS_PENDING);
 
@@ -11990,11 +12022,12 @@ void smb3_set_sign_rsp(struct ksmbd_work *work)
 	struct channel *chann;
 	char signature[SMB2_CMACAES_SIZE];
 	struct kvec *iov;
-	u16 command = conn->ops->get_cmd_val(work);
+	u16 command;
 	int n_vec;
 	char *signing_key;
 
 	hdr = ksmbd_resp_buf_curr(work);
+	command = le16_to_cpu(hdr->Command);
 
 	if (command == SMB2_SESSION_SETUP_HE &&
 	    (!conn->binding || hdr->Status != STATUS_SUCCESS)) {
