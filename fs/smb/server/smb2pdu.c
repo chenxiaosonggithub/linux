@@ -11876,7 +11876,7 @@ int smb2_notify(struct ksmbd_work *work)
 		goto out;
 	}
 
-	argv = kmalloc_obj(*argv, KSMBD_DEFAULT_GFP);
+	argv = kmalloc(sizeof(void *), KSMBD_DEFAULT_GFP);
 	if (!argv) {
 		rsp->hdr.Status = STATUS_INSUFFICIENT_RESOURCES;
 		err = -ENOMEM;
