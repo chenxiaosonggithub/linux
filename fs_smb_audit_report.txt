@@ -1,0 +1,343 @@
+fs/smb 静态审计报告
+====================
+
+审计对象:
+  分支: smb-merge-260925-1600
+  提交: f7fc329d5bae
+  日期: 2026-09-25
+
+结论
+----
+
+当前分支中确认了多处实质问题，包括页缓存旧数据暴露、3 类资源泄漏、
+错误的 session 析构、计数失衡和协议实现偏差。本轮没有确认新的 UAF
+或无条件 NULL 解引用。
+
+
+一、优先处理的问题
+------------------
+
+1. [高] 扩展文件后可能暴露旧 EOF 后的页缓存数据
+
+   CIFS inode 固定使用 16 KiB block size；在常见 4 KiB 页配置下，
+   pagecache_isize_extended() 会直接返回。以下路径都没有清理横跨旧
+   EOF 的 folio：
+
+     fs/smb/client/inode.c:3056       普通 truncate
+     fs/smb/client/smb2ops.c:3558     zero-range
+     fs/smb/client/cifsfs.c:1467      clone
+     fs/smb/client/cifsfs.c:1581      copychunk
+
+   通过 mmap 在旧 EOF 后弄脏的数据，之后可能随文件扩展成为实际文件
+   内容，造成数据泄露或文件损坏。
+
+   当前分支尚未包含修复；remotes/paulo/for-dave 已分别有：
+
+     71d1d179ec50  truncate
+     ac1343f739b2  zero-range
+     199c84031bda  clone
+     03bad42e469d  copychunk
+
+2. [中高] 部分初始化的 session 被交给完整析构
+
+   位置:
+     fs/smb/server/mgmt/user_session.c:398
+     fs/smb/server/mgmt/user_session.c:841
+
+   __session_create() 在 xarray、rwsem 和 session ID 初始化前就可能跳到
+   统一错误出口；ksmbd_session_destroy() 却无条件操作这些对象，并释放
+   从未分配的 ID 0。后者必然触发 ida_free() WARN，调试锁配置下还可能
+   因未初始化锁而崩溃。
+
+   建议采用分阶段 unwind，或先初始化全部析构依赖并记录 session ID
+   是否有效。
+
+3. [中] SMB Direct listener 错误路径泄漏 socket
+
+   位置:
+     fs/smb/server/transport_rdma.c:355
+     fs/smb/server/transport_rdma.c:415
+
+   创建的局部 sc 直到 listen 成功后才写入 listener->socket。至少
+   rdma_bind_addr() 或 rdma_listen() 失败时，错误出口只清理
+   listener->socket，无法释放局部 sc 及其 RDMA CM 资源。
+
+4. [中] 重复 IPC response 覆盖并泄漏首个 response
+
+   位置:
+     fs/smb/server/transport_ipc.c:264
+     fs/smb/server/transport_ipc.c:575
+
+   handle_response() 在验证消息类型前先把 entry->response 清零，随后又
+   无条件分配、覆盖。第一个正确响应唤醒 waiter 后，如果第二个顺序响应
+   先到达，错误类型会使 waiter 超时并泄漏首缓冲区；重复正确响应也会
+   覆盖并泄漏它。waiter 取得写锁前没有兜底。
+
+5. [中] persistent ID 分配失败会永久放宽 fd 上限
+
+   位置:
+     fs/smb/server/vfs_cache.c:1173
+     fs/smb/server/smb2pdu.c:4761
+
+   __open_id() 只有 volatile-ID 路径扣减 fd_limit，但任意 ID 分配失败
+   都会调用 fd_limit_close() 增加计数。persistent-ID 失败后 CREATE 又
+   关闭已成功的 volatile handle，再增加一次，最终由 N 变成 N+1。
+   反复触发可逐步绕过配置的打开文件上限。
+
+6. [中] TCP interface 列表部分构建失败不回滚
+
+   位置:
+     fs/smb/server/transport_tcp.c:676
+     fs/smb/server/transport_tcp.c:695
+
+   alloc_iface() 每成功一次就立即加入全局列表；后续分配失败直接返回。
+   已插入节点会泄漏到 transport destroy，配置重试还会继续产生重复项。
+
+7. [中] 压缩启发式存在多处错误
+
+   a) pow4(size_t) 溢出
+
+      位置: fs/smb/client/compress.c:47
+
+      64 位上 64 KiB 样本的四次方正好回绕为 0；普通 128 KiB write
+      即可达到该样本量。32 位上最小 2 KiB 样本已经溢出，导致熵计算
+      结果失真。
+
+   b) BYTE_DIST 结果反转
+
+      位置: fs/smb/client/compress.c:102
+
+      top-64 bucket 覆盖超过 90% 本应表示分布集中、适合压缩，当前却
+      返回 BYTE_DIST_BAD。这是 5ac1f99fdd09 枚举化时引入的逻辑回归。
+
+   c) 非 4 KiB 页系统采样错误
+
+      位置: fs/smb/client/compress.c:164
+
+      collect_sample() 每次实际前进 4 KiB，却用 PAGE_SIZE - 2 KiB 判断
+      结束；64 KiB 页上的 64 KiB 输入只检查前 6 KiB 中的 4 KiB。
+      样本达到 4 MiB 后还会进行大量 part == 0 的空循环。
+
+   d) 非法排序比较器
+
+      位置: fs/smb/client/compress.c:150
+
+      比较器对相等元素返回 1 而不是 0，违反 sort() 比较器约定。
+
+8. [中] POSIX default ACL 没有进入 NTACL hash
+
+   位置:
+     fs/smb/server/ndr.c:296
+     fs/smb/server/ndr.c:340
+     fs/smb/server/vfs.c:1641
+
+   ndr_encode_posix_acl() 会为 def_acl 写非零 referent，但实际编码被错误
+   地嵌套在 if (acl) 中。目录只有 default ACL、没有扩展 access ACL
+   时，default ACL 内容完全不进入 POSIX ACL hash，其变化可能无法使
+   缓存的 NT security descriptor 失效。
+
+   ACL entry 循环还没有立即检查 permission 写入结果；非末条 entry 的
+   瞬态 -ENOMEM 可被下一轮成功结果覆盖，最终返回成功和截断 blob。
+
+9. [中] 网络接口查询遗漏同一接口上的其他地址
+
+   位置:
+     fs/smb/server/smb2pdu.c:10509
+     fs/smb/server/smb2pdu.c:10601
+
+   IPv4 helper 跳过 secondary 地址并在首个 primary 后退出；IPv6 循环
+   同样只返回一个地址。MS-SMB2 要求每个 IP 地址生成一个
+   NETWORK_INTERFACE_INFO，因此客户端会遗漏 alias/额外 IPv6 地址，
+   影响 multichannel 和故障切换。
+
+   规范:
+     MS-SMB2 3.3.5.15.11
+     https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/21176e9a-ec3e-4d54-adde-bed5c13f64b8
+
+
+二、其他实质问题
+----------------
+
+1. 控制 work 入队失败被忽略
+
+   位置:
+     fs/smb/server/server.c:504
+     fs/smb/server/server.c:464
+     fs/smb/server/transport_ipc.c:419
+     fs/smb/server/transport_ipc.c:988
+
+   __queue_ctrl_work() 的 -ENOMEM 在启动和 reset 路径被忽略，可能留下
+   STARTING/RESETTING 状态但没有后续 worker。
+
+2. oplock 路径忽略异步请求注册失败
+
+   位置:
+     fs/smb/server/oplock.c:1215
+     fs/smb/server/oplock.c:1278
+     fs/smb/server/oplock.c:1333
+     fs/smb/server/smb2pdu.c:1269
+
+   三个路径忽略 setup_async_work() 失败，仍发送 STATUS_PENDING 和未分配
+   的 AsyncId == 0。
+
+3. stream-info 分配失败被转换成成功
+
+   位置: fs/smb/server/smb2pdu.c:6937
+
+   kmalloc() 失败仅 break，最终返回成功和截断结果，而不是 -ENOMEM。
+
+4. deferred-close 仅比较 dentry 指针
+
+   位置:
+     fs/smb/client/misc.c:614
+     fs/smb/client/inode.c:1982
+
+   dentry 被 unhash 后重新 lookup 会生成新对象，导致 rename/unlink 前未
+   关闭对应 handle。remotes/paulo/cifs.rename 已有修复 1e3d1202394b，
+   当前分支未包含。
+
+
+三、文档及协议引用错误
+----------------------
+
+1. fs/smb/client/smb2ops.c:1722
+
+   FileEndOfFileInformation 是 MS-FSCC 2.4.14，不是 2.4.13。
+   https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/75241cca-3167-472f-8058-a52d77c6bb17
+
+2. fs/smb/client/readdir.c:329
+
+   FILE_FULL_DIRECTORY_INFO::EaSize 的结构及 reparse-tag 规则应引用
+   MS-FSCC 2.4.15，而不是 2.4.14、2.4.19。
+
+3. fs/smb/client/smb2pdu.h:206
+
+   FileIdExtdDirectoryInformation 应为 MS-FSCC 2.4.23，不是 2.4.18。
+   https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/36172f0b-8dce-435a-8748-859978d632f8
+
+4. fs/smb/client/fs_context.c:2020
+
+   durable request 的默认 timeout 规则应引用 MS-SMB2 2.2.13.2.11，而非
+   response 的 2.2.14.2.12。
+
+5. fs/smb/client/smb2pdu.c:4119
+
+   “note 354” 已陈旧。CHANGE_NOTIFY 的 64 KiB Windows 限制当前位于
+   MS-SMB2 3.3.5.19、product behavior note 411；建议直接引用章节。
+
+6. fs/smb/client/cifsglob.h:2194
+
+   MS-CIFS 2.4.55 应为 MS-CIFS 2.2.4.55。
+
+7. fs/smb/server/mgmt/ksmbd_ida.h:13-27
+
+   当前注释是 SMB1 的 16-bit TID/UID 规则，却用于 SMB2 allocator。
+   TreeId 应引用 MS-SMB2 3.3.5.7，SessionId 应引用 3.3.5.5.1。
+
+8. fs/smb/common/smb2pdu.h:145,166
+
+   CreditCharge 仅在 SMB 2.0.2 中为 MBZ；其他 dialect 中是实际 credit
+   charge。
+
+9. fs/smb/common/smb2pdu.h:633
+
+   NEGOTIATE Response 的 SystemTime 不是 MBZ，而是服务器当前 FILETIME。
+   https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/bcd6d594-017b-47fc-8742-b7d847791783
+
+10. fs/smb/common/smb2pdu.h:1147
+
+    FILE_DELETE_ON_CLOSE 不是 MBZ，而是有效的 CreateOptions 标志。
+
+11. fs/smb/common/smb2pdu.h:1435,1439,1496
+
+    IOCTL 字段注释复制错位：Reserved 应为保留并置 0；request
+    InputOffset 是输入缓冲区偏移；response InputOffset 指向响应 Buffer。
+
+    Request 2.2.31:
+      https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/5c03c9d6-15de-48a2-9835-8fb37f8a79d8
+
+    Response 2.2.32:
+      https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/f70eccb6-e1be-4db8-9c47-9ac86ef18dbb
+
+12. fs/smb/common/fscc.h:253
+
+    FILE_BASIC_INFO 的信息类是 level 4，不是 level 18。
+    https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/16023025-8a78-492f-8b96-c873b042ac50
+
+13. fs/smb/common/fscc.h:297
+
+    smb2_file_eof_info 应为 level 20，不是 level 10。
+
+14. fs/smb/server/smb2pdu.h:286
+
+    smb2_file_standard_info 是 level 5，不是 level 18。
+    https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/5afa7f66-619c-48f3-955f-68c4ece704ae
+
+15. fs/smb/common/fscc.h:493
+
+    VolumeLabelLength 仅在尾随 NUL 存在时才包含该 NUL。
+
+16. fs/smb/client/compress.h:24
+
+    smb2_compression_hdr 没有 OriginalPayloadSize 字段；宏值 16 是完整
+    header 大小，当前注释错误。
+
+17. fs/smb/common/smb2pdu.h:1570
+
+    后面列的是文件信息类，应引用 MS-FSCC 2.4；文件系统类对应 2.5。
+
+18. fs/smb/server/vfs_cache.c:1651
+
+    “MS-SMB2 Step 8” 无法唯一定位。v1 durable reconnect 应写
+    MS-SMB2 3.3.5.9.7 step 8；v2 reconnect 位于 3.3.5.9.12。
+
+
+四、typo 及小型注释问题
+----------------------
+
+  fs/smb/common/fscc.h:232
+    FILE_BASIC_INFO_INFO -> FILE_BASIC_INFO
+
+  fs/smb/client/smb2pdu.h:143
+    get_retrieval_point_count_req -> get_retrieval_pointer_count_req
+
+  fs/smb/common/smb2pdu.h:248
+    playload -> payload
+
+  fs/smb/server/smb2pdu.c:134
+    skipable -> skippable
+
+  fs/smb/server/smb2pdu.c:405
+    adjuct -> adjust
+
+  fs/smb/smbdirect/connection.c:848
+    Readd -> Re-add
+
+  fs/smb/common/compress/lz77.c:28
+    effectivelly -> effectively
+
+  fs/smb/smbdirect/pdu.h:11
+    fragmented sized -> fragmented sizes
+
+  fs/smb/common/smb2pdu.h:205
+    注释缺少右括号。
+
+  fs/smb/server/smb2pdu.h:167,372
+    SidBuffer contain -> SidBuffer contains
+
+  fs/smb/common/smbfsctl.h:15
+    “seven below” 已陈旧；当前文件有 40 个 BB add struct。
+
+  fs/smb/client/cifsglob.h:643,662
+    以 /** 开始但不是合法 kernel-doc；应改为普通注释或补合法实体名。
+
+
+五、验证范围和限制
+------------------
+
+本轮进行了静态代码审计、Git 历史交叉验证和 Microsoft Open
+Specifications 核对。
+
+当前环境没有 make、gcc、clang、sparse 或 smatch，因此未进行完整编译、
+fault injection 或运行时复现。审计过程中未修改源代码；生成本报告前工作树
+保持干净。
