@@ -15,6 +15,7 @@
 #include <linux/list_sort.h>
 #include <linux/sizes.h>
 #include <linux/slab.h>
+#include <kunit/visibility.h>
 #include "glob.h"
 #include "../common/smb2status.h"
 #include "connection.h"
@@ -26,51 +27,9 @@
 #include "vfs_cache.h"
 #include "mgmt/user_session.h"
 
-struct ksmbd_notify_event {
-	struct list_head list;
-	u32 action;
-	u64 when;
-	size_t name_len;
-	size_t alloc_size;
-	char name[];
-};
-
-struct ksmbd_notify {
-	struct fsnotify_group *group;
-	struct fsnotify_mark *mark;
-	struct fsnotify_mark *tree_mark;
-	struct ksmbd_file *fp;
-	/* Protects filter, rename state and the queued events. */
-	spinlock_t lock;
-	struct list_head events;
-	unsigned int num_events;
-	/* Includes reservations, rename state and events owned by requests. */
-	size_t event_bytes;
-	bool overflow;
-	u32 filter;
-	u32 mask;
-	bool watch_tree;
-	struct ksmbd_notify_event *moved_from_event;
-	u32 moved_from_mask;
-	u32 moved_from_cookie;
-	struct delayed_work moved_from_work;
-	struct delayed_work broadcast_work;
-};
-
-struct ksmbd_notify_req {
-	wait_queue_head_t wait;
-	struct list_head events;
-	unsigned int num_events;
-	bool overflow;
-	bool notified;
-};
-
 #define KSMBD_NOTIFY_BROADCAST_MSECS	1000
 #define KSMBD_NOTIFY_BROADCAST_MAX_EVENTS	100
 #define KSMBD_NOTIFY_MOVED_FROM_MSECS	100
-#define KSMBD_NOTIFY_MAX_BYTES		SZ_64K
-#define KSMBD_NOTIFY_NAME_EVENT_MASK	(FS_CREATE | FS_DELETE | \
-					 FS_MOVED_FROM | FS_MOVED_TO)
 #define KSMBD_NOTIFY_EVENT_MASK		(FS_ACCESS | FS_ATTRIB | FS_MODIFY | \
 					 KSMBD_NOTIFY_NAME_EVENT_MASK)
 
@@ -1321,3 +1280,115 @@ out:
 		ksmbd_fd_put(work, fp);
 	return err;
 }
+
+#if IS_ENABLED(CONFIG_SMB_SERVER_KUNIT_TESTS)
+void ksmbd_notify_free_event_test(struct ksmbd_notify *notify,
+				  struct ksmbd_notify_event *event)
+{
+	ksmbd_notify_free_event(notify, event);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_free_event_test);
+
+void ksmbd_notify_free_events_test(struct ksmbd_notify *notify,
+				   struct list_head *events)
+{
+	ksmbd_notify_free_events(notify, events);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_free_events_test);
+
+struct ksmbd_notify_event *
+ksmbd_notify_alloc_event_test(struct ksmbd_notify *notify, u32 action,
+			      const struct qstr *file_name, gfp_t gfp)
+{
+	return ksmbd_notify_alloc_event(notify, action, file_name, gfp);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_alloc_event_test);
+
+void ksmbd_notify_queue_event_test(struct ksmbd_notify *notify,
+				   struct ksmbd_notify_event *event)
+{
+	ksmbd_notify_queue_event(notify, event);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_queue_event_test);
+
+void ksmbd_notify_set_overflow_test(struct ksmbd_notify *notify)
+{
+	ksmbd_notify_set_overflow(notify);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_set_overflow_test);
+
+bool ksmbd_notify_take_events_test(struct ksmbd_notify *notify,
+				   struct ksmbd_notify_req *notify_req)
+{
+	return ksmbd_notify_take_events(notify, notify_req);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_take_events_test);
+
+void ksmbd_notify_requeue_events_test(struct ksmbd_notify *notify,
+				      struct ksmbd_notify_req *notify_req)
+{
+	ksmbd_notify_requeue_events(notify, notify_req);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_requeue_events_test);
+
+int ksmbd_notify_reply_test(struct ksmbd_work *work,
+			    struct smb2_change_notify_req *req,
+			    struct smb2_change_notify_rsp *rsp,
+			    struct ksmbd_notify *notify,
+			    struct ksmbd_notify_req *notify_req)
+{
+	return ksmbd_notify_reply(work, req, rsp, notify, notify_req);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_reply_test);
+
+bool ksmbd_notify_events_pending_test(struct ksmbd_notify *notify)
+{
+	return ksmbd_notify_events_pending(notify);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_events_pending_test);
+
+void ksmbd_notify_broadcast_test(struct ksmbd_notify *notify)
+{
+	ksmbd_notify_broadcast(notify);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_broadcast_test);
+
+void ksmbd_notify_save_moved_from_test(struct ksmbd_notify *notify,
+				       u32 mask, u32 cookie,
+				       const struct qstr *file_name)
+{
+	ksmbd_notify_save_moved_from(notify, mask, cookie, file_name);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_save_moved_from_test);
+
+bool ksmbd_notify_handle_rename_test(struct ksmbd_notify *notify, u32 mask,
+				     u32 cookie, const struct qstr *file_name)
+{
+	return ksmbd_notify_handle_rename(notify, mask, cookie, file_name);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_handle_rename_test);
+
+void ksmbd_notify_moved_from_timeout_test(struct work_struct *work)
+{
+	ksmbd_notify_moved_from_timeout(work);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_moved_from_timeout_test);
+
+int ksmbd_notify_handle_inode_event_test(struct ksmbd_notify *notify,
+					 u32 mask, struct inode *inode,
+					 struct inode *dir,
+					 const struct qstr *file_name,
+					 u32 cookie)
+{
+	return ksmbd_notify_handle_inode_event(notify, mask, inode, dir,
+					     file_name, cookie);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_handle_inode_event_test);
+
+/* Waiter lookup compares cancel_fn with the original callback's address. */
+void ksmbd_notify_set_cancel_fn_test(struct ksmbd_work *work)
+{
+	work->cancel_fn = smb2_notify_cancel;
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_set_cancel_fn_test);
+#endif

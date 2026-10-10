@@ -13,14 +13,97 @@
 #ifndef __SMB_SERVER_NOTIFY_H__
 #define __SMB_SERVER_NOTIFY_H__
 
+#include <linux/fsnotify_backend.h>
+#include <linux/sizes.h>
+#include <linux/workqueue.h>
+
 struct ksmbd_work;
 struct ksmbd_file;
 struct smb2_change_notify_req;
 struct smb2_change_notify_rsp;
 
+struct ksmbd_notify_event {
+	struct list_head list;
+	u32 action;
+	u64 when;
+	size_t name_len;
+	size_t alloc_size;
+	char name[];
+};
+
+struct ksmbd_notify {
+	struct fsnotify_group *group;
+	struct fsnotify_mark *mark;
+	struct fsnotify_mark *tree_mark;
+	struct ksmbd_file *fp;
+	/* Protects filter, rename state and the queued events. */
+	spinlock_t lock;
+	struct list_head events;
+	unsigned int num_events;
+	/* Includes reservations, rename state and events owned by requests. */
+	size_t event_bytes;
+	bool overflow;
+	u32 filter;
+	u32 mask;
+	bool watch_tree;
+	struct ksmbd_notify_event *moved_from_event;
+	u32 moved_from_mask;
+	u32 moved_from_cookie;
+	struct delayed_work moved_from_work;
+	struct delayed_work broadcast_work;
+};
+
+struct ksmbd_notify_req {
+	wait_queue_head_t wait;
+	struct list_head events;
+	unsigned int num_events;
+	bool overflow;
+	bool notified;
+};
+
+#define KSMBD_NOTIFY_MAX_BYTES		SZ_64K
+#define KSMBD_NOTIFY_NAME_EVENT_MASK	(FS_CREATE | FS_DELETE | \
+					 FS_MOVED_FROM | FS_MOVED_TO)
+
 int ksmbd_handle_notify(struct ksmbd_work *work,
 			struct smb2_change_notify_req *req,
 			struct smb2_change_notify_rsp *rsp);
 void ksmbd_notify_remove(struct ksmbd_file *fp);
+
+#if IS_ENABLED(CONFIG_SMB_SERVER_KUNIT_TESTS)
+void ksmbd_notify_free_event_test(struct ksmbd_notify *notify,
+				  struct ksmbd_notify_event *event);
+void ksmbd_notify_free_events_test(struct ksmbd_notify *notify,
+				   struct list_head *events);
+struct ksmbd_notify_event *
+ksmbd_notify_alloc_event_test(struct ksmbd_notify *notify, u32 action,
+			      const struct qstr *file_name, gfp_t gfp);
+void ksmbd_notify_queue_event_test(struct ksmbd_notify *notify,
+				   struct ksmbd_notify_event *event);
+void ksmbd_notify_set_overflow_test(struct ksmbd_notify *notify);
+bool ksmbd_notify_take_events_test(struct ksmbd_notify *notify,
+				   struct ksmbd_notify_req *notify_req);
+void ksmbd_notify_requeue_events_test(struct ksmbd_notify *notify,
+				      struct ksmbd_notify_req *notify_req);
+int ksmbd_notify_reply_test(struct ksmbd_work *work,
+			    struct smb2_change_notify_req *req,
+			    struct smb2_change_notify_rsp *rsp,
+			    struct ksmbd_notify *notify,
+			    struct ksmbd_notify_req *notify_req);
+bool ksmbd_notify_events_pending_test(struct ksmbd_notify *notify);
+void ksmbd_notify_broadcast_test(struct ksmbd_notify *notify);
+void ksmbd_notify_save_moved_from_test(struct ksmbd_notify *notify,
+				       u32 mask, u32 cookie,
+				       const struct qstr *file_name);
+bool ksmbd_notify_handle_rename_test(struct ksmbd_notify *notify, u32 mask,
+				     u32 cookie, const struct qstr *file_name);
+void ksmbd_notify_moved_from_timeout_test(struct work_struct *work);
+int ksmbd_notify_handle_inode_event_test(struct ksmbd_notify *notify,
+					 u32 mask, struct inode *inode,
+					 struct inode *dir,
+					 const struct qstr *file_name,
+					 u32 cookie);
+void ksmbd_notify_set_cancel_fn_test(struct ksmbd_work *work);
+#endif
 
 #endif /* __SMB_SERVER_NOTIFY_H__ */
