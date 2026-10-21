@@ -941,4 +941,10 @@ char *ksmbd_notify_tree_name_test(struct ksmbd_notify *notify,
 				      file_name, tree_name);
 }
 EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_tree_name_test);
+
+void ksmbd_notify_moved_from_timeout_test(struct work_struct *work)
+{
+	ksmbd_notify_moved_from_timeout(work);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_moved_from_timeout_test);
 #endif
