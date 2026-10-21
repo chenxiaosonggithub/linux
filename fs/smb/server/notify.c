@@ -10,11 +10,11 @@
  *
  */
 
-#include <kunit/visibility.h>
 #include <linux/fsnotify_backend.h>
 #include <linux/dcache.h>
 #include <linux/sizes.h>
 #include <linux/slab.h>
+#include <kunit/visibility.h>
 #include "glob.h"
 #include "../common/smb2status.h"
 #include "connection.h"
@@ -793,6 +793,48 @@ out:
 		ksmbd_fd_put(work, fp);
 	return err;
 }
+
+#if IS_ENABLED(CONFIG_SMB_SERVER_KUNIT_TESTS)
+void ksmbd_notify_free_event_test(struct ksmbd_notify *notify,
+				  struct ksmbd_notify_event *event)
+{
+	ksmbd_notify_free_event(notify, event);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_free_event_test);
+
+void ksmbd_notify_free_events_test(struct ksmbd_notify *notify,
+				   struct list_head *events)
+{
+	ksmbd_notify_free_events(notify, events);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_free_events_test);
+
+struct ksmbd_notify_event *
+ksmbd_notify_alloc_event_test(struct ksmbd_notify *notify, u32 action,
+			      const struct qstr *file_name, gfp_t gfp)
+{
+	return ksmbd_notify_alloc_event(notify, action, file_name, gfp);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_alloc_event_test);
+
+void ksmbd_notify_queue_event_test(struct ksmbd_notify *notify,
+				   struct ksmbd_notify_event *event)
+{
+	ksmbd_notify_queue_event(notify, event);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_queue_event_test);
+
+int ksmbd_notify_handle_event_test(struct fsnotify_group *group, u32 mask,
+				   const void *data, int data_type,
+				   struct inode *dir,
+				   const struct qstr *file_name, u32 cookie,
+				   struct fsnotify_iter_info *iter_info)
+{
+	return ksmbd_notify_handle_event(group, mask, data, data_type, dir,
+					file_name, cookie, iter_info);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_handle_event_test);
+#endif
 
 #if IS_ENABLED(CONFIG_SMB_SERVER_KUNIT_TESTS)
 char *ksmbd_notify_tree_name_test(struct ksmbd_notify *notify,
