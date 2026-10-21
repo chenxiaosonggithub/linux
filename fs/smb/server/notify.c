@@ -985,6 +985,27 @@ void ksmbd_notify_queue_event_test(struct ksmbd_notify *notify,
 }
 EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_queue_event_test);
 
+void ksmbd_notify_save_moved_from_test(struct ksmbd_notify *notify,
+				       u32 mask, u32 cookie,
+				       const struct qstr *file_name)
+{
+	ksmbd_notify_save_moved_from(notify, mask, cookie, file_name);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_save_moved_from_test);
+
+bool ksmbd_notify_handle_rename_test(struct ksmbd_notify *notify, u32 mask,
+				     u32 cookie, const struct qstr *file_name)
+{
+	return ksmbd_notify_handle_rename(notify, mask, cookie, file_name);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_handle_rename_test);
+
+void ksmbd_notify_moved_from_timeout_test(struct work_struct *work)
+{
+	ksmbd_notify_moved_from_timeout(work);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_moved_from_timeout_test);
+
 int ksmbd_notify_handle_inode_event_test(struct ksmbd_notify *notify,
 					 u32 mask, struct inode *inode,
 					 struct inode *dir,
@@ -1019,10 +1040,4 @@ char *ksmbd_notify_tree_name_test(struct ksmbd_notify *notify,
 				      file_name, tree_name);
 }
 EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_tree_name_test);
-
-void ksmbd_notify_moved_from_timeout_test(struct work_struct *work)
-{
-	ksmbd_notify_moved_from_timeout(work);
-}
-EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_moved_from_timeout_test);
 #endif
