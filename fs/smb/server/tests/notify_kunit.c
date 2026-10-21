@@ -112,6 +112,25 @@ static void ksmbd_notify_test_oversized_event(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ctx->notify.event_bytes, (size_t)0);
 }
 
+static void ksmbd_notify_test_rename_limit(struct kunit *test)
+{
+	struct ksmbd_notify_test_ctx *ctx = test->priv;
+	struct ksmbd_notify *notify = &ctx->notify;
+
+	ksmbd_notify_save_moved_from_test(notify, FS_MOVED_FROM, 1,
+					  &ksmbd_notify_test_name);
+	KUNIT_ASSERT_NOT_NULL(test, notify->moved_from_event);
+	KUNIT_EXPECT_GT(test, notify->event_bytes, (size_t)0);
+	ksmbd_notify_test_fill(test);
+	KUNIT_EXPECT_TRUE(test, ksmbd_notify_handle_rename_test(notify, FS_MOVED_TO,
+								1, &ksmbd_notify_test_name));
+	KUNIT_EXPECT_TRUE(test, notify->overflow);
+	KUNIT_EXPECT_NULL(test, notify->moved_from_event);
+	KUNIT_EXPECT_EQ(test, notify->event_bytes, (size_t)0);
+	ksmbd_notify_moved_from_timeout_test(&notify->moved_from_work.work);
+	KUNIT_EXPECT_TRUE(test, list_empty(&notify->events));
+}
+
 static void ksmbd_notify_test_filtered_rename(struct kunit *test)
 {
 	struct ksmbd_notify_test_ctx *ctx = test->priv;
@@ -424,6 +443,7 @@ static void notify_test_rename_source_replaced(struct kunit *test)
 static struct kunit_case ksmbd_notify_test_cases[] = {
 	KUNIT_CASE(ksmbd_notify_test_queue_limit),
 	KUNIT_CASE(ksmbd_notify_test_oversized_event),
+	KUNIT_CASE(ksmbd_notify_test_rename_limit),
 	KUNIT_CASE(ksmbd_notify_test_filtered_rename),
 	KUNIT_CASE_PARAM(ksmbd_notify_test_access, ksmbd_notify_access_gen_params),
 	KUNIT_CASE_PARAM(notify_test_name_filter, notify_filter_gen_params),
