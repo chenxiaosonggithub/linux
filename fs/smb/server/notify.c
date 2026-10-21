@@ -10,6 +10,7 @@
  *
  */
 
+#include <kunit/visibility.h>
 #include <linux/fsnotify_backend.h>
 #include <linux/dcache.h>
 #include "glob.h"
@@ -576,3 +577,16 @@ out:
 		ksmbd_fd_put(work, fp);
 	return err;
 }
+
+#if IS_ENABLED(CONFIG_SMB_SERVER_KUNIT_TESTS)
+char *ksmbd_notify_tree_name_test(struct ksmbd_notify *notify,
+				  const void *data, int data_type,
+				  struct inode *dir,
+				  const struct qstr *file_name,
+				  struct qstr *tree_name)
+{
+	return ksmbd_notify_tree_name(notify, data, data_type, dir,
+				      file_name, tree_name);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_tree_name_test);
+#endif

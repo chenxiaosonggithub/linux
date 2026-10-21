@@ -42,4 +42,12 @@ int ksmbd_handle_notify(struct ksmbd_work *work,
 			struct smb2_change_notify_req *req,
 			struct smb2_change_notify_rsp *rsp);
 
+#if IS_ENABLED(CONFIG_SMB_SERVER_KUNIT_TESTS)
+char *ksmbd_notify_tree_name_test(struct ksmbd_notify *notify,
+				  const void *data, int data_type,
+				  struct inode *dir,
+				  const struct qstr *file_name,
+				  struct qstr *tree_name);
+#endif
+
 #endif /* __SMB_SERVER_NOTIFY_H__ */

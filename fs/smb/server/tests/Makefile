@@ -2,3 +2,5 @@
 # Copyright (C) 2026 Hang Nan <nanx95726@gmail.com>
 
 obj-$(CONFIG_SMB_SERVER_KUNIT_TESTS) += smbacl_kunit.o
+obj-$(CONFIG_SMB_SERVER_KUNIT_TESTS) += ksmbd_notify_kunit.o
+ksmbd_notify_kunit-y := notify_kunit.o
