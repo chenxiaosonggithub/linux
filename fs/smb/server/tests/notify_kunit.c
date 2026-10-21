@@ -439,6 +439,78 @@ static void notify_test_rename_source_replaced(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, notify->event_bytes, bytes);
 	notify_test_expect_list(test, &notify->events, names, actions, 2);
 }
+static void notify_test_rename_names(struct kunit *test)
+{
+	struct ksmbd_notify_test_ctx *ctx = test->priv;
+	struct ksmbd_notify *notify = &ctx->notify;
+	static const char * const names[] = { "old-name", "new-name" };
+	const u32 actions[] = { FILE_ACTION_RENAMED_OLD_NAME,
+				FILE_ACTION_RENAMED_NEW_NAME };
+	struct ksmbd_notify_event *old;
+	size_t bytes;
+
+	notify_test_inode_event(test, FS_MOVED_FROM, names[0], 42);
+	old = notify->moved_from_event;
+	KUNIT_ASSERT_NOT_NULL(test, old);
+	notify_test_inode_event(test, FS_MOVED_TO, names[1], 42);
+	KUNIT_EXPECT_NULL(test, notify->moved_from_event);
+	KUNIT_EXPECT_EQ(test, notify->moved_from_mask, 0U);
+	KUNIT_EXPECT_EQ(test, notify->moved_from_cookie, 0U);
+	KUNIT_EXPECT_EQ(test, notify->num_events, 2U);
+	notify_test_expect_list(test, &notify->events, names, actions, 2);
+	KUNIT_EXPECT_PTR_EQ(test, list_first_entry(&notify->events,
+				struct ksmbd_notify_event, list), old);
+	bytes = notify->event_bytes;
+	ksmbd_notify_moved_from_timeout_test(&notify->moved_from_work.work);
+	KUNIT_EXPECT_EQ(test, notify->num_events, 2U);
+	KUNIT_EXPECT_EQ(test, notify->event_bytes, bytes);
+	notify_test_expect_list(test, &notify->events, names, actions, 2);
+}
+
+static void notify_test_rename_without_source(struct kunit *test)
+{
+	struct ksmbd_notify_test_ctx *ctx = test->priv;
+	static const char * const names[] = { "incoming" };
+	const u32 actions[] = { FILE_ACTION_ADDED };
+	struct ksmbd_notify_event *event;
+
+	notify_test_inode_event(test, FS_MOVED_TO, names[0], 42);
+	KUNIT_EXPECT_NULL(test, ctx->notify.moved_from_event);
+	KUNIT_EXPECT_EQ(test, ctx->notify.num_events, 1U);
+	notify_test_expect_list(test, &ctx->notify.events, names, actions, 1);
+	KUNIT_ASSERT_FALSE(test, list_empty(&ctx->notify.events));
+	event = list_first_entry(&ctx->notify.events, struct ksmbd_notify_event, list);
+	KUNIT_EXPECT_EQ(test, ctx->notify.event_bytes, event->alloc_size);
+}
+
+static void notify_test_rename_cookie_mismatch(struct kunit *test)
+{
+	struct ksmbd_notify_test_ctx *ctx = test->priv;
+	struct ksmbd_notify *notify = &ctx->notify;
+	static const char * const names[] = { "incoming", "outgoing" };
+	const u32 actions[] = { FILE_ACTION_ADDED, FILE_ACTION_REMOVED };
+	struct ksmbd_notify_event *old, *added;
+	size_t bytes;
+
+	notify_test_inode_event(test, FS_MOVED_FROM, "outgoing", 1);
+	old = notify->moved_from_event;
+	KUNIT_ASSERT_NOT_NULL(test, old);
+	notify_test_inode_event(test, FS_MOVED_TO, "incoming", 2);
+	KUNIT_EXPECT_PTR_EQ(test, notify->moved_from_event, old);
+	KUNIT_EXPECT_EQ(test, notify->moved_from_cookie, 1U);
+	KUNIT_EXPECT_EQ(test, notify->num_events, 1U);
+	notify_test_expect_list(test, &notify->events, names, actions, 1);
+	KUNIT_ASSERT_FALSE(test, list_empty(&notify->events));
+	added = list_first_entry(&notify->events, struct ksmbd_notify_event, list);
+	bytes = old->alloc_size + added->alloc_size;
+	KUNIT_EXPECT_EQ(test, notify->event_bytes, bytes);
+	cancel_delayed_work_sync(&notify->moved_from_work);
+	ksmbd_notify_moved_from_timeout_test(&notify->moved_from_work.work);
+	KUNIT_EXPECT_NULL(test, notify->moved_from_event);
+	KUNIT_EXPECT_EQ(test, notify->num_events, 2U);
+	KUNIT_EXPECT_EQ(test, notify->event_bytes, bytes);
+	notify_test_expect_list(test, &notify->events, names, actions, 2);
+}
 
 static struct kunit_case ksmbd_notify_test_cases[] = {
 	KUNIT_CASE(ksmbd_notify_test_queue_limit),
@@ -451,6 +523,9 @@ static struct kunit_case ksmbd_notify_test_cases[] = {
 	KUNIT_CASE_PARAM(notify_test_nonrecursive_scope, notify_scope_gen_params),
 	KUNIT_CASE(notify_test_rename_timeout),
 	KUNIT_CASE(notify_test_rename_source_replaced),
+	KUNIT_CASE(notify_test_rename_names),
+	KUNIT_CASE(notify_test_rename_without_source),
+	KUNIT_CASE(notify_test_rename_cookie_mismatch),
 	{}
 };
 
