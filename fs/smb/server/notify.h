@@ -75,6 +75,11 @@ ksmbd_notify_alloc_event_test(struct ksmbd_notify *notify, u32 action,
 			      const struct qstr *file_name, gfp_t gfp);
 void ksmbd_notify_queue_event_test(struct ksmbd_notify *notify,
 				   struct ksmbd_notify_event *event);
+int ksmbd_notify_handle_inode_event_test(struct ksmbd_notify *notify,
+					 u32 mask, struct inode *inode,
+					 struct inode *dir,
+					 const struct qstr *file_name,
+					 u32 cookie);
 int ksmbd_notify_handle_event_test(struct fsnotify_group *group, u32 mask,
 				   const void *data, int data_type,
 				   struct inode *dir,
@@ -88,11 +93,6 @@ char *ksmbd_notify_tree_name_test(struct ksmbd_notify *notify,
 				  struct inode *dir,
 				  const struct qstr *file_name,
 				  struct qstr *tree_name);
-int ksmbd_notify_handle_inode_event_test(struct ksmbd_notify *notify,
-					 u32 mask, struct inode *inode,
-					 struct inode *dir,
-					 const struct qstr *file_name,
-					 u32 cookie);
 #endif
 
 #endif /* __SMB_SERVER_NOTIFY_H__ */
