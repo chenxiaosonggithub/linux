@@ -90,6 +90,7 @@ int ksmbd_notify_reply_test(struct ksmbd_work *work,
 			    struct smb2_change_notify_rsp *rsp,
 			    struct ksmbd_notify *notify,
 			    struct ksmbd_notify_req *notify_req);
+bool ksmbd_notify_events_pending_test(struct ksmbd_notify *notify);
 void ksmbd_notify_broadcast_test(struct ksmbd_notify *notify);
 void ksmbd_notify_save_moved_from_test(struct ksmbd_notify *notify,
 				       u32 mask, u32 cookie,
