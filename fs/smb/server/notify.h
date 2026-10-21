@@ -99,6 +99,9 @@ char *ksmbd_notify_tree_name_test(struct ksmbd_notify *notify,
 				  struct inode *dir,
 				  const struct qstr *file_name,
 				  struct qstr *tree_name);
+void *ksmbd_notify_encode_events_test(struct ksmbd_work *work,
+				     struct list_head *events,
+				     u32 max_len, size_t *data_len);
 #endif
 
 #endif /* __SMB_SERVER_NOTIFY_H__ */

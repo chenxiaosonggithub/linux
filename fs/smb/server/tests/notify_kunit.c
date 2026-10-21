@@ -5,11 +5,13 @@
 #include <linux/cred.h>
 #include <linux/file.h>
 #include <linux/mount.h>
+#include <linux/nls.h>
 #include <linux/pseudo_fs.h>
 #include <linux/slab.h>
 #include <linux/uio.h>
 
 #include "../../common/smb2status.h"
+#include "../connection.h"
 #include "../ksmbd_work.h"
 #include "../notify.h"
 #include "../smb_common.h"
@@ -666,6 +668,229 @@ static void notify_test_rename_cookie_mismatch(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, notify->event_bytes, bytes);
 	notify_test_expect_list(test, &notify->events, names, actions, 2);
 }
+static struct ksmbd_notify_event *
+notify_test_add(struct kunit *test, u32 action, const char *name)
+{
+	struct ksmbd_notify_test_ctx *ctx = test->priv;
+	struct qstr qname = QSTR_INIT(name, strlen(name));
+	struct ksmbd_notify_event *event;
+
+	event = ksmbd_notify_alloc_event_test(&ctx->notify, action, &qname,
+					    GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, event);
+	ksmbd_notify_queue_event_test(&ctx->notify, event);
+	return event;
+}
+static void notify_test_unload_nls(void *data)
+{
+	unload_nls(data);
+}
+
+static void notify_test_kvfree(void *data)
+{
+	kvfree(data);
+}
+
+static void *notify_test_encode(struct kunit *test, u32 max_len, size_t *len)
+{
+	struct ksmbd_notify_test_ctx *ctx = test->priv;
+	struct ksmbd_work *work;
+	struct ksmbd_conn *conn;
+	void *data;
+
+	work = kunit_kzalloc(test, sizeof(*work), GFP_KERNEL);
+	conn = kunit_kzalloc(test, sizeof(*conn), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, work);
+	KUNIT_ASSERT_NOT_NULL(test, conn);
+	conn->local_nls = load_nls("utf8");
+	KUNIT_ASSERT_NOT_NULL(test, conn->local_nls);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, notify_test_unload_nls,
+						      conn->local_nls), 0);
+	work->conn = conn;
+	data = ksmbd_notify_encode_events_test(work, &ctx->notify.events, max_len, len);
+	if (data)
+		KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, notify_test_kvfree,
+							      data), 0);
+	return data;
+}
+
+static void notify_test_expect_record(struct kunit *test, const u8 *data,
+				     size_t len, size_t offset, u32 action,
+				     const u8 *name, u32 name_len, u32 next)
+{
+	const struct file_notify_information *info;
+
+	KUNIT_ASSERT_LE(test, offset + sizeof(*info) + name_len, len);
+	info = (const struct file_notify_information *)(data + offset);
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(info->NextEntryOffset), next);
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(info->Action), action);
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(info->FileNameLength), name_len);
+	KUNIT_EXPECT_MEMEQ(test, info->FileName, name, name_len);
+}
+
+static void notify_test_encode_padding(struct kunit *test)
+{
+	/* 20 protocol bytes, followed by four zeroed compound-padding bytes. */
+	const u8 expected[] = {
+		0, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0,
+		'a', 0, 'b', 0, 'c', 0, 0, 0, 0, 0, 0, 0,
+	};
+	size_t len = 0;
+	u8 *data;
+
+	notify_test_add(test, FILE_ACTION_ADDED, "abc");
+	data = notify_test_encode(test, 20, &len);
+	KUNIT_ASSERT_NOT_NULL(test, data);
+	KUNIT_EXPECT_EQ(test, len, (size_t)20);
+	KUNIT_EXPECT_MEMEQ(test, data, expected, sizeof(expected));
+}
+
+static void notify_test_encode_unicode_order(struct kunit *test)
+{
+	const u8 ascii[] = { 'a', 0 };
+	const u8 chinese[] = { 0x2d, 0x4e };
+	const u8 emoji[] = { 0x3d, 0xd8, 0x00, 0xde };
+	struct ksmbd_notify_event *event;
+	size_t len = 0;
+	u8 *data;
+
+	/* Insert out of order; equal timestamps must keep insertion order. */
+	event = notify_test_add(test, FILE_ACTION_REMOVED, "\xf0\x9f\x98\x80");
+	event->when = 20;
+	event = notify_test_add(test, FILE_ACTION_ADDED, "a");
+	event->when = 10;
+	event = notify_test_add(test, FILE_ACTION_MODIFIED, "\xe4\xb8\xad");
+	event->when = 10;
+	data = notify_test_encode(test, 48, &len);
+	KUNIT_ASSERT_NOT_NULL(test, data);
+	KUNIT_EXPECT_EQ(test, len, (size_t)48);
+	notify_test_expect_record(test, data, len, 0, FILE_ACTION_ADDED,
+				  ascii, sizeof(ascii), 16);
+	notify_test_expect_record(test, data, len, 16, FILE_ACTION_MODIFIED,
+				  chinese, sizeof(chinese), 16);
+	notify_test_expect_record(test, data, len, 32, FILE_ACTION_REMOVED,
+				  emoji, sizeof(emoji), 0);
+	KUNIT_EXPECT_EQ(test, data[14], 0);
+	KUNIT_EXPECT_EQ(test, data[15], 0);
+	KUNIT_EXPECT_EQ(test, data[30], 0);
+	KUNIT_EXPECT_EQ(test, data[31], 0);
+}
+
+struct notify_encode_limit_case {
+	const char *name;
+	u32 limit;
+	bool fits;
+};
+
+static const struct notify_encode_limit_case notify_encode_limit_cases[] = {
+	{ "zero", 0, false },
+	{ "one_byte_short", 19, false },
+	{ "exact", 20, true },
+	{ "one_byte_extra", 21, true },
+};
+
+static void notify_test_encode_limit_desc(const struct notify_encode_limit_case *param,
+					  char *desc)
+{
+	strscpy(desc, param->name, KUNIT_PARAM_DESC_SIZE);
+}
+
+KUNIT_ARRAY_PARAM(notify_test_encode_limit, notify_encode_limit_cases,
+		  notify_test_encode_limit_desc);
+
+static void notify_test_encode_limit(struct kunit *test)
+{
+	const struct notify_encode_limit_case *param = test->param_value;
+	struct ksmbd_notify_test_ctx *ctx = test->priv;
+	size_t len = 123, bytes;
+	void *data;
+
+	notify_test_add(test, FILE_ACTION_ADDED, "abc");
+	bytes = ctx->notify.event_bytes;
+	data = notify_test_encode(test, param->limit, &len);
+	if (param->fits) {
+		KUNIT_ASSERT_NOT_NULL(test, data);
+		KUNIT_EXPECT_EQ(test, len, (size_t)20);
+	} else {
+		KUNIT_EXPECT_NULL(test, data);
+		KUNIT_EXPECT_EQ(test, len, (size_t)0);
+	}
+	/* Encoding neither owns nor releases the original event records. */
+	KUNIT_EXPECT_EQ(test, ctx->notify.event_bytes, bytes);
+	KUNIT_EXPECT_EQ(test, ctx->notify.num_events, 1U);
+}
+
+static void notify_test_encode_batch_too_large(struct kunit *test)
+{
+	size_t len = 123;
+	void *data;
+
+	notify_test_add(test, FILE_ACTION_ADDED, "a");
+	notify_test_add(test, FILE_ACTION_ADDED, "b");
+	data = notify_test_encode(test, 31, &len);
+	KUNIT_EXPECT_NULL(test, data);
+	KUNIT_EXPECT_EQ(test, len, (size_t)0);
+}
+
+struct notify_duplicate_case {
+	const char *name;
+	const char *names[3];
+	u32 actions[3];
+	unsigned int count;
+};
+
+static const struct notify_duplicate_case notify_duplicate_cases[] = {
+	{ "adjacent", { "same", "same", "same" },
+	  { FILE_ACTION_MODIFIED, FILE_ACTION_MODIFIED, FILE_ACTION_MODIFIED }, 1 },
+	{ "case_sensitive", { "Same", "same", "same" },
+	  { FILE_ACTION_MODIFIED, FILE_ACTION_MODIFIED, FILE_ACTION_MODIFIED }, 2 },
+	{ "different_action", { "same", "same", "same" },
+	  { FILE_ACTION_ADDED, FILE_ACTION_REMOVED, FILE_ACTION_MODIFIED }, 3 },
+	{ "different_length", { "file", "file2", "file2" },
+	  { FILE_ACTION_MODIFIED, FILE_ACTION_MODIFIED, FILE_ACTION_MODIFIED }, 2 },
+	{ "nonadjacent", { "a", "b", "a" },
+	  { FILE_ACTION_MODIFIED, FILE_ACTION_MODIFIED, FILE_ACTION_MODIFIED }, 3 },
+};
+
+static void notify_test_duplicate_desc(const struct notify_duplicate_case *param,
+				       char *desc)
+{
+	strscpy(desc, param->name, KUNIT_PARAM_DESC_SIZE);
+}
+
+KUNIT_ARRAY_PARAM(notify_test_duplicate, notify_duplicate_cases, notify_test_duplicate_desc);
+
+static void notify_test_encode_duplicates(struct kunit *test)
+{
+	const struct notify_duplicate_case *param = test->param_value;
+	struct ksmbd_notify_event *event;
+	size_t len = 0, offset = 0;
+	unsigned int i, j;
+	u8 *data;
+
+	for (i = 0; i < 3; i++) {
+		event = notify_test_add(test, param->actions[i], param->names[i]);
+		event->when = i + 1;
+	}
+	data = notify_test_encode(test, 128, &len);
+	KUNIT_ASSERT_NOT_NULL(test, data);
+	for (i = 0; i < param->count; i++) {
+		const struct file_notify_information *info;
+		u8 expected[16] = {};
+		size_t name_len = strlen(param->names[i]);
+		u32 next;
+
+		KUNIT_ASSERT_LE(test, offset + sizeof(*info), len);
+		info = (const struct file_notify_information *)(data + offset);
+		for (j = 0; j < name_len; j++)
+			expected[j * 2] = param->names[i][j];
+		next = i + 1 == param->count ? 0 : ALIGN(12 + name_len * 2, 4);
+		notify_test_expect_record(test, data, len, offset, param->actions[i],
+					  expected, name_len * 2, next);
+		offset += ALIGN(12 + name_len * 2, 4);
+	}
+	KUNIT_EXPECT_EQ(test, offset, len);
+}
 
 static struct kunit_case ksmbd_notify_test_cases[] = {
 	KUNIT_CASE_PARAM(notify_test_tree_relative_name, notify_test_tree_gen_params),
@@ -682,6 +907,11 @@ static struct kunit_case ksmbd_notify_test_cases[] = {
 	KUNIT_CASE(notify_test_rename_names),
 	KUNIT_CASE(notify_test_rename_without_source),
 	KUNIT_CASE(notify_test_rename_cookie_mismatch),
+	KUNIT_CASE(notify_test_encode_padding),
+	KUNIT_CASE(notify_test_encode_unicode_order),
+	KUNIT_CASE_PARAM(notify_test_encode_limit, notify_test_encode_limit_gen_params),
+	KUNIT_CASE(notify_test_encode_batch_too_large),
+	KUNIT_CASE_PARAM(notify_test_encode_duplicates, notify_test_duplicate_gen_params),
 	{}
 };
 
