@@ -334,6 +334,7 @@ static void notify_test_cancel_overflow(struct kunit *test)
 						      &ctx->req), 0);
 	KUNIT_EXPECT_EQ(test, rsp.hdr.Status, STATUS_NOTIFY_ENUM_DIR);
 	KUNIT_EXPECT_EQ(test, le32_to_cpu(rsp.OutputBufferLength), 0U);
+	KUNIT_EXPECT_FALSE(test, ksmbd_notify_events_pending_test(notify));
 
 	event = notify_test_alloc(notify);
 	KUNIT_ASSERT_NOT_NULL(test, event);
@@ -423,6 +424,7 @@ static void notify_test_filtered_rename(struct kunit *test)
 					     &ksmbd_notify_test_name, 1);
 	KUNIT_EXPECT_NULL(test, notify->moved_from_event);
 	KUNIT_EXPECT_EQ(test, notify->event_bytes, (size_t)0);
+	KUNIT_EXPECT_FALSE(test, ksmbd_notify_events_pending_test(notify));
 }
 
 struct ksmbd_notify_access_case {
@@ -492,6 +494,8 @@ static void notify_test_access(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ret, 0);
 	KUNIT_EXPECT_FALSE(test, notify->overflow);
 	KUNIT_EXPECT_EQ(test, notify->num_events, param->modified ? 1U : 0U);
+	KUNIT_EXPECT_EQ(test, ksmbd_notify_events_pending_test(notify),
+			param->modified);
 	if (!param->modified) {
 		KUNIT_EXPECT_TRUE(test, list_empty(&notify->events));
 		KUNIT_EXPECT_EQ(test, notify->event_bytes, (size_t)0);

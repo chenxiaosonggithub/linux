@@ -1351,6 +1351,12 @@ int ksmbd_notify_reply_test(struct ksmbd_work *work,
 }
 EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_reply_test);
 
+bool ksmbd_notify_events_pending_test(struct ksmbd_notify *notify)
+{
+	return ksmbd_notify_events_pending(notify);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_events_pending_test);
+
 void ksmbd_notify_broadcast_test(struct ksmbd_notify *notify)
 {
 	ksmbd_notify_broadcast(notify);
