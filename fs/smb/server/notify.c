@@ -847,4 +847,15 @@ char *ksmbd_notify_tree_name_test(struct ksmbd_notify *notify,
 				      file_name, tree_name);
 }
 EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_tree_name_test);
+
+int ksmbd_notify_handle_inode_event_test(struct ksmbd_notify *notify,
+					 u32 mask, struct inode *inode,
+					 struct inode *dir,
+					 const struct qstr *file_name,
+					 u32 cookie)
+{
+	return ksmbd_notify_handle_inode_event(notify, mask, inode, dir,
+					     file_name, cookie);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_handle_inode_event_test);
 #endif

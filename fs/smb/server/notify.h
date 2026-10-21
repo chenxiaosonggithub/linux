@@ -83,6 +83,11 @@ char *ksmbd_notify_tree_name_test(struct ksmbd_notify *notify,
 				  struct inode *dir,
 				  const struct qstr *file_name,
 				  struct qstr *tree_name);
+int ksmbd_notify_handle_inode_event_test(struct ksmbd_notify *notify,
+					 u32 mask, struct inode *inode,
+					 struct inode *dir,
+					 const struct qstr *file_name,
+					 u32 cookie);
 #endif
 
 #endif /* __SMB_SERVER_NOTIFY_H__ */
