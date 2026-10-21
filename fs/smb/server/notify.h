@@ -93,6 +93,7 @@ char *ksmbd_notify_tree_name_test(struct ksmbd_notify *notify,
 				  struct inode *dir,
 				  const struct qstr *file_name,
 				  struct qstr *tree_name);
+void ksmbd_notify_moved_from_timeout_test(struct work_struct *work);
 #endif
 
 #endif /* __SMB_SERVER_NOTIFY_H__ */

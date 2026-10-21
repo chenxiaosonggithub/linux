@@ -511,6 +511,70 @@ static void notify_test_nonrecursive_scope(struct kunit *test)
 	if (!param->accepted)
 		KUNIT_EXPECT_EQ(test, ctx->notify.event_bytes, (size_t)0);
 }
+static void notify_test_inode_event(struct kunit *test, u32 mask,
+				    const char *name, u32 cookie)
+{
+	struct ksmbd_notify_test_ctx *ctx = test->priv;
+	struct qstr qname = QSTR_INIT(name, strlen(name));
+
+	KUNIT_ASSERT_EQ(test, ksmbd_notify_handle_inode_event_test(&ctx->notify,
+				mask, NULL, NULL, &qname, cookie), 0);
+}
+
+static void notify_test_rename_timeout(struct kunit *test)
+{
+	struct ksmbd_notify_test_ctx *ctx = test->priv;
+	struct ksmbd_notify *notify = &ctx->notify;
+	static const char * const names[] = { "old" };
+	const u32 actions[] = { FILE_ACTION_REMOVED };
+	size_t bytes;
+
+	notify_test_inode_event(test, FS_MOVED_FROM, "old", 7);
+	KUNIT_ASSERT_NOT_NULL(test, notify->moved_from_event);
+	KUNIT_EXPECT_TRUE(test, list_empty(&notify->events));
+	KUNIT_EXPECT_EQ(test, notify->num_events, 0U);
+	bytes = notify->event_bytes;
+	KUNIT_EXPECT_EQ(test, bytes, notify->moved_from_event->alloc_size);
+	cancel_delayed_work_sync(&notify->moved_from_work);
+	ksmbd_notify_moved_from_timeout_test(&notify->moved_from_work.work);
+	KUNIT_EXPECT_NULL(test, notify->moved_from_event);
+	KUNIT_EXPECT_EQ(test, notify->num_events, 1U);
+	KUNIT_EXPECT_EQ(test, notify->event_bytes, bytes);
+	notify_test_expect_list(test, &notify->events, names, actions, 1);
+
+	/* A second timeout must not report the same removal twice. */
+	ksmbd_notify_moved_from_timeout_test(&notify->moved_from_work.work);
+	KUNIT_EXPECT_EQ(test, notify->num_events, 1U);
+	KUNIT_EXPECT_EQ(test, notify->event_bytes, bytes);
+	notify_test_expect_list(test, &notify->events, names, actions, 1);
+}
+
+static void notify_test_rename_source_replaced(struct kunit *test)
+{
+	struct ksmbd_notify_test_ctx *ctx = test->priv;
+	struct ksmbd_notify *notify = &ctx->notify;
+	static const char * const names[] = { "first", "second" };
+	const u32 actions[] = { FILE_ACTION_REMOVED, FILE_ACTION_REMOVED };
+	size_t first_bytes, bytes;
+
+	notify_test_inode_event(test, FS_MOVED_FROM, "first", 1);
+	KUNIT_ASSERT_NOT_NULL(test, notify->moved_from_event);
+	first_bytes = notify->event_bytes;
+	notify_test_inode_event(test, FS_MOVED_FROM, "second", 2);
+	KUNIT_ASSERT_NOT_NULL(test, notify->moved_from_event);
+	KUNIT_EXPECT_STREQ(test, notify->moved_from_event->name, "second");
+	KUNIT_EXPECT_EQ(test, notify->moved_from_cookie, 2U);
+	KUNIT_EXPECT_EQ(test, notify->num_events, 1U);
+	notify_test_expect_list(test, &notify->events, names, actions, 1);
+	bytes = first_bytes + notify->moved_from_event->alloc_size;
+	KUNIT_EXPECT_EQ(test, notify->event_bytes, bytes);
+	cancel_delayed_work_sync(&notify->moved_from_work);
+	ksmbd_notify_moved_from_timeout_test(&notify->moved_from_work.work);
+	KUNIT_EXPECT_NULL(test, notify->moved_from_event);
+	KUNIT_EXPECT_EQ(test, notify->num_events, 2U);
+	KUNIT_EXPECT_EQ(test, notify->event_bytes, bytes);
+	notify_test_expect_list(test, &notify->events, names, actions, 2);
+}
 
 static struct kunit_case ksmbd_notify_test_cases[] = {
 	KUNIT_CASE_PARAM(notify_test_tree_relative_name, notify_test_tree_gen_params),
@@ -521,6 +585,8 @@ static struct kunit_case ksmbd_notify_test_cases[] = {
 	KUNIT_CASE_PARAM(notify_test_name_filter, notify_test_filter_gen_params),
 	KUNIT_CASE(notify_test_filtered_full_queue),
 	KUNIT_CASE_PARAM(notify_test_nonrecursive_scope, notify_test_scope_gen_params),
+	KUNIT_CASE(notify_test_rename_timeout),
+	KUNIT_CASE(notify_test_rename_source_replaced),
 	{}
 };
 
