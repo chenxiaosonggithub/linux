@@ -18,6 +18,11 @@ struct ksmbd_notify_test_ctx {
 
 static const struct qstr ksmbd_notify_test_name = QSTR_INIT("entry", 5);
 
+/* Tests explicitly dispatch events so timers cannot consume test state. */
+static void ksmbd_notify_test_work(struct work_struct *work)
+{
+}
+
 static int ksmbd_notify_test_init(struct kunit *test)
 {
 	struct ksmbd_notify_test_ctx *ctx;
@@ -28,6 +33,7 @@ static int ksmbd_notify_test_init(struct kunit *test)
 	test->priv = ctx;
 	spin_lock_init(&ctx->notify.lock);
 	INIT_LIST_HEAD(&ctx->notify.events);
+	INIT_DELAYED_WORK(&ctx->notify.moved_from_work, ksmbd_notify_test_work);
 	ctx->notify.fp = &ctx->fp;
 	ctx->notify.filter = FILE_NOTIFY_CHANGE_FILE_NAME;
 	ctx->notify.mask = KSMBD_NOTIFY_NAME_EVENT_MASK;
@@ -39,6 +45,8 @@ static void ksmbd_notify_test_exit(struct kunit *test)
 	struct ksmbd_notify_test_ctx *ctx = test->priv;
 	struct ksmbd_notify *notify = &ctx->notify;
 
+	cancel_delayed_work_sync(&notify->moved_from_work);
+	ksmbd_notify_free_event_test(notify, notify->moved_from_event);
 	ksmbd_notify_free_events_test(notify, &notify->events);
 	KUNIT_EXPECT_EQ(test, notify->event_bytes, (size_t)0);
 }
@@ -102,6 +110,19 @@ static void ksmbd_notify_test_oversized_event(struct kunit *test)
 	ksmbd_notify_free_event_test(&ctx->notify, event);
 	KUNIT_EXPECT_TRUE(test, ctx->notify.overflow);
 	KUNIT_EXPECT_EQ(test, ctx->notify.event_bytes, (size_t)0);
+}
+
+static void ksmbd_notify_test_filtered_rename(struct kunit *test)
+{
+	struct ksmbd_notify_test_ctx *ctx = test->priv;
+	struct ksmbd_notify *notify = &ctx->notify;
+
+	notify->filter = 0;
+	notify->mask = 0;
+	ksmbd_notify_handle_inode_event_test(notify, FS_MOVED_FROM, NULL, NULL,
+					     &ksmbd_notify_test_name, 1);
+	KUNIT_EXPECT_NULL(test, notify->moved_from_event);
+	KUNIT_EXPECT_EQ(test, notify->event_bytes, (size_t)0);
 }
 
 struct ksmbd_notify_access_case {
@@ -339,6 +360,7 @@ static void notify_test_nonrecursive_scope(struct kunit *test)
 static struct kunit_case ksmbd_notify_test_cases[] = {
 	KUNIT_CASE(ksmbd_notify_test_queue_limit),
 	KUNIT_CASE(ksmbd_notify_test_oversized_event),
+	KUNIT_CASE(ksmbd_notify_test_filtered_rename),
 	KUNIT_CASE_PARAM(ksmbd_notify_test_access, ksmbd_notify_access_gen_params),
 	KUNIT_CASE_PARAM(notify_test_name_filter, notify_filter_gen_params),
 	KUNIT_CASE(notify_test_filtered_full_queue),
