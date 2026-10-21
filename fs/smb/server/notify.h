@@ -61,6 +61,23 @@ int ksmbd_handle_notify(struct ksmbd_work *work,
 void ksmbd_notify_remove(struct ksmbd_file *fp);
 
 #if IS_ENABLED(CONFIG_SMB_SERVER_KUNIT_TESTS)
+void ksmbd_notify_free_event_test(struct ksmbd_notify *notify,
+				  struct ksmbd_notify_event *event);
+void ksmbd_notify_free_events_test(struct ksmbd_notify *notify,
+				   struct list_head *events);
+struct ksmbd_notify_event *
+ksmbd_notify_alloc_event_test(struct ksmbd_notify *notify, u32 action,
+			      const struct qstr *file_name, gfp_t gfp);
+void ksmbd_notify_queue_event_test(struct ksmbd_notify *notify,
+				   struct ksmbd_notify_event *event);
+int ksmbd_notify_handle_event_test(struct fsnotify_group *group, u32 mask,
+				   const void *data, int data_type,
+				   struct inode *dir,
+				   const struct qstr *file_name, u32 cookie,
+				   struct fsnotify_iter_info *iter_info);
+#endif
+
+#if IS_ENABLED(CONFIG_SMB_SERVER_KUNIT_TESTS)
 char *ksmbd_notify_tree_name_test(struct ksmbd_notify *notify,
 				  const void *data, int data_type,
 				  struct inode *dir,
