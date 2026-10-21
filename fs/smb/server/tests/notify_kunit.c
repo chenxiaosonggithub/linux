@@ -1015,6 +1015,191 @@ static void notify_test_encode_duplicates(struct kunit *test)
 	}
 	KUNIT_EXPECT_EQ(test, offset, len);
 }
+struct notify_test_waiter {
+	struct ksmbd_work work;
+	struct ksmbd_notify_req req;
+	struct ksmbd_notify *notify;
+	void *arg;
+};
+
+static void notify_test_waiter_free(void *data)
+{
+	struct notify_test_waiter *waiter = data;
+
+	list_del_init(&waiter->work.fp_entry);
+	ksmbd_notify_free_events_test(waiter->notify, &waiter->req.events);
+}
+
+static struct notify_test_waiter *notify_test_waiter_add(struct kunit *test)
+{
+	struct ksmbd_notify_test_ctx *ctx = test->priv;
+	struct notify_test_waiter *waiter;
+
+	waiter = kunit_kzalloc(test, sizeof(*waiter), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, waiter);
+	waiter->notify = &ctx->notify;
+	init_waitqueue_head(&waiter->req.wait);
+	INIT_LIST_HEAD(&waiter->req.events);
+	INIT_LIST_HEAD(&waiter->work.fp_entry);
+	waiter->work.state = KSMBD_WORK_ACTIVE;
+	waiter->arg = &waiter->req;
+	waiter->work.cancel_argv = &waiter->arg;
+	ksmbd_notify_set_cancel_fn_test(&waiter->work);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, notify_test_waiter_free,
+						      waiter), 0);
+	list_add_tail(&waiter->work.fp_entry, &ctx->fp.blocked_works);
+	return waiter;
+}
+
+static void notify_test_waiter_fifo(struct kunit *test)
+{
+	struct ksmbd_notify_test_ctx *ctx = test->priv;
+	struct notify_test_waiter *first, *second;
+	static const char * const pair[] = { "before", "after" };
+	const u32 actions[] = { FILE_ACTION_RENAMED_OLD_NAME,
+				FILE_ACTION_RENAMED_NEW_NAME };
+	static const char * const later[] = { "later" };
+	const u32 added[] = { FILE_ACTION_ADDED };
+	size_t bytes;
+
+	first = notify_test_waiter_add(test);
+	second = notify_test_waiter_add(test);
+	notify_test_inode_event(test, FS_MOVED_FROM, pair[0], 11);
+	notify_test_inode_event(test, FS_MOVED_TO, pair[1], 11);
+	bytes = ctx->notify.event_bytes;
+	ksmbd_notify_broadcast_test(&ctx->notify);
+	KUNIT_EXPECT_TRUE(test, first->req.notified);
+	KUNIT_EXPECT_FALSE(test, second->req.notified);
+	KUNIT_EXPECT_EQ(test, first->req.num_events, 2U);
+	KUNIT_EXPECT_TRUE(test, list_empty(&second->req.events));
+	KUNIT_EXPECT_TRUE(test, list_empty(&ctx->notify.events));
+	KUNIT_EXPECT_EQ(test, ctx->notify.num_events, 0U);
+	KUNIT_EXPECT_EQ(test, ctx->notify.event_bytes, bytes);
+	notify_test_expect_list(test, &first->req.events, pair, actions, 2);
+	ksmbd_notify_broadcast_test(&ctx->notify);
+	KUNIT_EXPECT_FALSE(test, second->req.notified);
+
+	/* The first request stays linked, but must not take another batch. */
+	notify_test_add(test, FILE_ACTION_ADDED, "later");
+	ksmbd_notify_broadcast_test(&ctx->notify);
+	KUNIT_EXPECT_TRUE(test, second->req.notified);
+	KUNIT_EXPECT_EQ(test, second->req.num_events, 1U);
+	notify_test_expect_list(test, &first->req.events, pair, actions, 2);
+	notify_test_expect_list(test, &second->req.events, later, added, 1);
+	kunit_release_action(test, notify_test_waiter_free, first);
+	kunit_release_action(test, notify_test_waiter_free, second);
+	KUNIT_EXPECT_EQ(test, ctx->notify.event_bytes, (size_t)0);
+}
+
+enum notify_waiter_skip {
+	WAITER_CANCELLED, WAITER_CLOSED, WAITER_NOTIFIED,
+	WAITER_OTHER_CALLBACK, WAITER_NO_ARGS,
+};
+
+struct notify_waiter_case {
+	const char *name;
+	enum notify_waiter_skip reason;
+};
+
+static const struct notify_waiter_case notify_waiter_cases[] = {
+	{ "cancelled", WAITER_CANCELLED },
+	{ "closed", WAITER_CLOSED },
+	{ "already_notified", WAITER_NOTIFIED },
+	{ "other_callback", WAITER_OTHER_CALLBACK },
+	{ "missing_arguments", WAITER_NO_ARGS },
+};
+
+static void notify_test_waiter_desc(const struct notify_waiter_case *param, char *desc)
+{
+	strscpy(desc, param->name, KUNIT_PARAM_DESC_SIZE);
+}
+
+KUNIT_ARRAY_PARAM(notify_test_waiter, notify_waiter_cases, notify_test_waiter_desc);
+
+static void notify_test_other_cancel(void **argv)
+{
+}
+
+static void notify_test_waiter_skip(struct kunit *test)
+{
+	const struct notify_waiter_case *param = test->param_value;
+	struct ksmbd_notify_test_ctx *ctx = test->priv;
+	struct notify_test_waiter *skip, *active;
+	static const char * const names[] = { "entry" };
+	const u32 actions[] = { FILE_ACTION_ADDED };
+
+	skip = notify_test_waiter_add(test);
+	active = notify_test_waiter_add(test);
+	switch (param->reason) {
+	case WAITER_CANCELLED:
+		skip->work.state = KSMBD_WORK_CANCELLED;
+		break;
+	case WAITER_CLOSED:
+		skip->work.state = KSMBD_WORK_CLOSED;
+		break;
+	case WAITER_NOTIFIED:
+		skip->req.notified = true;
+		break;
+	case WAITER_OTHER_CALLBACK:
+		skip->work.cancel_fn = notify_test_other_cancel;
+		break;
+	case WAITER_NO_ARGS:
+		skip->work.cancel_argv = NULL;
+		break;
+	}
+	notify_test_add(test, FILE_ACTION_ADDED, "entry");
+	ksmbd_notify_broadcast_test(&ctx->notify);
+	KUNIT_EXPECT_EQ(test, skip->req.notified, param->reason == WAITER_NOTIFIED);
+	KUNIT_EXPECT_EQ(test, skip->req.num_events, 0U);
+	KUNIT_EXPECT_TRUE(test, list_empty(&skip->req.events));
+	KUNIT_EXPECT_TRUE(test, active->req.notified);
+	KUNIT_EXPECT_EQ(test, active->req.num_events, 1U);
+	notify_test_expect_list(test, &active->req.events, names, actions, 1);
+	kunit_release_action(test, notify_test_waiter_free, active);
+
+	/* With only an ineligible waiter left, synchronous delivery is allowed. */
+	notify_test_add(test, FILE_ACTION_ADDED, "entry");
+	KUNIT_EXPECT_TRUE(test, ksmbd_notify_take_events_test(&ctx->notify, &ctx->req));
+	KUNIT_EXPECT_EQ(test, ctx->req.num_events, 1U);
+	notify_test_expect_list(test, &ctx->req.events, names, actions, 1);
+	KUNIT_EXPECT_TRUE(test, list_empty(&skip->req.events));
+	kunit_release_action(test, notify_test_waiter_free, skip);
+}
+
+static void notify_test_waiter_before_sync(struct kunit *test)
+{
+	struct ksmbd_notify_test_ctx *ctx = test->priv;
+	struct notify_test_waiter *waiter = notify_test_waiter_add(test);
+	static const char * const names[] = { "queued" };
+	const u32 actions[] = { FILE_ACTION_ADDED };
+	size_t bytes;
+
+	notify_test_add(test, FILE_ACTION_ADDED, "queued");
+	bytes = ctx->notify.event_bytes;
+	KUNIT_EXPECT_FALSE(test, ksmbd_notify_take_events_test(&ctx->notify, &ctx->req));
+	KUNIT_EXPECT_TRUE(test, waiter->req.notified);
+	KUNIT_EXPECT_EQ(test, waiter->req.num_events, 1U);
+	KUNIT_EXPECT_EQ(test, ctx->req.num_events, 0U);
+	KUNIT_EXPECT_FALSE(test, ctx->req.overflow);
+	KUNIT_EXPECT_TRUE(test, list_empty(&ctx->req.events));
+	KUNIT_EXPECT_EQ(test, ctx->notify.event_bytes, bytes);
+	notify_test_expect_list(test, &waiter->req.events, names, actions, 1);
+	kunit_release_action(test, notify_test_waiter_free, waiter);
+}
+
+static void notify_test_waiter_empty(struct kunit *test)
+{
+	struct ksmbd_notify_test_ctx *ctx = test->priv;
+	struct notify_test_waiter *waiter = notify_test_waiter_add(test);
+
+	ksmbd_notify_broadcast_test(&ctx->notify);
+	KUNIT_EXPECT_FALSE(test, ksmbd_notify_take_events_test(&ctx->notify, &ctx->req));
+	KUNIT_EXPECT_FALSE(test, waiter->req.notified);
+	KUNIT_EXPECT_TRUE(test, list_empty(&waiter->req.events));
+	KUNIT_EXPECT_EQ(test, waiter->req.num_events, 0U);
+	KUNIT_EXPECT_EQ(test, ctx->notify.event_bytes, (size_t)0);
+	kunit_release_action(test, notify_test_waiter_free, waiter);
+}
 
 static struct kunit_case ksmbd_notify_test_cases[] = {
 	KUNIT_CASE_PARAM(notify_test_tree_relative_name, notify_test_tree_gen_params),
@@ -1040,6 +1225,10 @@ static struct kunit_case ksmbd_notify_test_cases[] = {
 	KUNIT_CASE_PARAM(notify_test_encode_limit, notify_test_encode_limit_gen_params),
 	KUNIT_CASE(notify_test_encode_batch_too_large),
 	KUNIT_CASE_PARAM(notify_test_encode_duplicates, notify_test_duplicate_gen_params),
+	KUNIT_CASE(notify_test_waiter_fifo),
+	KUNIT_CASE_PARAM(notify_test_waiter_skip, notify_test_waiter_gen_params),
+	KUNIT_CASE(notify_test_waiter_before_sync),
+	KUNIT_CASE(notify_test_waiter_empty),
 	{}
 };
 
