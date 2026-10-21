@@ -1045,6 +1045,77 @@ static void notify_test_waiter_empty(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ctx->notify.event_bytes, (size_t)0);
 	kunit_release_action(test, notify_test_waiter_free, waiter);
 }
+struct notify_requeue_case {
+	const char *name;
+	bool waiter;
+};
+
+static const struct notify_requeue_case notify_requeue_cases[] = {
+	{ "retain_queue", false },
+	{ "deliver_to_waiter", true },
+};
+
+static void notify_requeue_desc(const struct notify_requeue_case *param, char *desc)
+{
+	strscpy(desc, param->name, KUNIT_PARAM_DESC_SIZE);
+}
+
+KUNIT_ARRAY_PARAM(notify_requeue, notify_requeue_cases, notify_requeue_desc);
+
+static void notify_test_requeue_order(struct kunit *test)
+{
+	const struct notify_requeue_case *param = test->param_value;
+	struct ksmbd_notify_test_ctx *ctx = test->priv;
+	struct notify_test_waiter *waiter = NULL;
+	struct ksmbd_notify_event *a, *b, *c, *event;
+	static const char * const names[] = { "A", "B", "C" };
+	const u32 actions[] = { FILE_ACTION_ADDED, FILE_ACTION_REMOVED,
+				FILE_ACTION_MODIFIED };
+	struct list_head *events;
+	size_t bytes;
+
+	a = notify_test_add(test, actions[0], names[0]);
+	b = notify_test_add(test, actions[1], names[1]);
+	KUNIT_ASSERT_TRUE(test, ksmbd_notify_take_events_test(&ctx->notify, &ctx->req));
+	KUNIT_EXPECT_EQ(test, ctx->req.num_events, 2U);
+	c = notify_test_add(test, actions[2], names[2]);
+	bytes = a->alloc_size + b->alloc_size + c->alloc_size;
+	KUNIT_EXPECT_EQ(test, ctx->notify.event_bytes, bytes);
+	if (param->waiter)
+		waiter = notify_test_waiter_add(test);
+	ksmbd_notify_requeue_events_test(&ctx->notify, &ctx->req);
+	KUNIT_EXPECT_EQ(test, ctx->req.num_events, 0U);
+	KUNIT_EXPECT_FALSE(test, ctx->req.overflow);
+	KUNIT_EXPECT_TRUE(test, list_empty(&ctx->req.events));
+	KUNIT_EXPECT_FALSE(test, ctx->notify.overflow);
+	KUNIT_EXPECT_EQ(test, ctx->notify.event_bytes, bytes);
+	if (waiter) {
+		KUNIT_EXPECT_TRUE(test, waiter->req.notified);
+		KUNIT_EXPECT_EQ(test, waiter->req.num_events, 3U);
+		KUNIT_EXPECT_EQ(test, ctx->notify.num_events, 0U);
+		KUNIT_EXPECT_TRUE(test, list_empty(&ctx->notify.events));
+		events = &waiter->req.events;
+	} else {
+		KUNIT_EXPECT_EQ(test, ctx->notify.num_events, 3U);
+		events = &ctx->notify.events;
+	}
+	notify_test_expect_list(test, events, names, actions, 3);
+	KUNIT_ASSERT_FALSE(test, list_empty(events));
+	event = list_first_entry(events, struct ksmbd_notify_event, list);
+	KUNIT_EXPECT_PTR_EQ(test, event, a);
+	event = list_next_entry(event, list);
+	KUNIT_EXPECT_PTR_EQ(test, event, b);
+	event = list_next_entry(event, list);
+	KUNIT_EXPECT_PTR_EQ(test, event, c);
+	KUNIT_EXPECT_TRUE(test, list_is_last(&event->list, events));
+
+	/* Repeating cancellation after ownership transfer must be a no-op. */
+	ksmbd_notify_requeue_events_test(&ctx->notify, &ctx->req);
+	KUNIT_EXPECT_EQ(test, ctx->notify.event_bytes, bytes);
+	notify_test_expect_list(test, events, names, actions, 3);
+	if (waiter)
+		kunit_release_action(test, notify_test_waiter_free, waiter);
+}
 
 static struct kunit_case ksmbd_notify_test_cases[] = {
 	KUNIT_CASE(ksmbd_notify_test_queue_limit),
@@ -1073,6 +1144,7 @@ static struct kunit_case ksmbd_notify_test_cases[] = {
 	KUNIT_CASE_PARAM(notify_test_waiter_skip, notify_waiter_gen_params),
 	KUNIT_CASE(notify_test_waiter_before_sync),
 	KUNIT_CASE(notify_test_waiter_empty),
+	KUNIT_CASE_PARAM(notify_test_requeue_order, notify_requeue_gen_params),
 	{}
 };
 
