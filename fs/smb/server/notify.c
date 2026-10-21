@@ -1146,4 +1146,12 @@ char *ksmbd_notify_tree_name_test(struct ksmbd_notify *notify,
 				      file_name, tree_name);
 }
 EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_tree_name_test);
+
+void *ksmbd_notify_encode_events_test(struct ksmbd_work *work,
+				     struct list_head *events,
+				     u32 max_len, size_t *data_len)
+{
+	return ksmbd_notify_encode_events(work, events, max_len, data_len);
+}
+EXPORT_SYMBOL_IF_KUNIT(ksmbd_notify_encode_events_test);
 #endif
